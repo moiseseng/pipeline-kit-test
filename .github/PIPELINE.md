@@ -60,7 +60,7 @@ Use two accounts: the repository owner, and a second account added as a collabor
 
 | # | Do this | Expected |
 |---|---|---|
-| 1 | Owner opens a pull request that edits `site/index.html` | Checks run. The owner can merge with no approval. Production publishes. |
+| 1 | Owner opens a pull request that edits `site/index.html` | Checks run. The owner merges with the bypass option and no approval. Production publishes. |
 | 2 | Collaborator opens the same kind of pull request | Merge is blocked until the owner approves. |
 | 3 | Collaborator pushes a new commit after the approval | The approval is dismissed and merge is blocked again. |
 | 4 | A pull request adds a file named `.env` | The checks fail and nobody can merge, the owner included. |
@@ -70,12 +70,15 @@ Use two accounts: the repository owner, and a second account added as a collabor
 | 8 | Run Rollback with an older commit from `main` | That version publishes again. |
 | 9 | Run Rollback with a commit that isn't on `main` | The run refuses it. |
 
-GitHub's documentation doesn't settle three points, so the test has to:
+What a first run on a public test repository showed:
 
-- Test 4 shows whether the owners' exception to the approval rule leaves the checks in force.
-- Whether an owner's pull request can merge by itself with auto-merge, or needs a click.
-- Whether a path can be left without an owner so that content merges with no approval. That
-  needs the approval count at 0 in "main: owner approval".
+- The owners' exception covers the approval only. With failing checks, an owner's merge is
+  refused too.
+- Auto-merge doesn't use the exception. An owner merges with the bypass option on the pull
+  request, or with `gh pr merge --admin`.
+
+Still to try: whether a path can be left without an owner so that content merges with no
+approval. That needs the approval count at 0 in "main: owner approval".
 
 ## Not included yet
 
