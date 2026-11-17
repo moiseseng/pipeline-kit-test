@@ -1,0 +1,75 @@
+# Publishes after code lands: main goes to production, the staging branch goes to staging.
+# Only the sites whose folder changed in the push are published.
+# Each environment accepts its own branch only, so a job on any other branch can't reach its secrets.
+name: Deploy
+
+on:
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.plan.outputs.environment }}
+      sites: ${{ steps.plan.outputs.sites }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Work out which sites this push publishes
+        id: plan
+        env:
+          BRANCH: ${{ github.ref_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$BRANCH" = "main" ]; then environment=production; else environment=staging; fi
+          yq -o=json '.' .github/pipeline.yml > "$RUNNER_TEMP/pipeline.json"
+          sites="$(python3 .github/scripts/pipeline.py plan "$RUNNER_TEMP/pipeline.json" \
+            --environment "$environment" --before "$BEFORE" --after "$AFTER")"
+          echo "Publishing to $environment: $sites"
+          {
+            echo "environment=$environment"
+            echo "sites=$sites"
+            if [ "$sites" = "[]" ]; then echo "any=false"; else echo "any=true"; fi
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: deploy ${{ matrix.site.name }}
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.plan.outputs.environment }}
+    concurrency:
+      group: deploy-${{ needs.plan.outputs.environment }}-${{ matrix.site.name }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        site: ${{ fromJSON(needs.plan.outputs.sites) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Publish
+        env:
+          SITE_NAME: ${{ matrix.site.name }}
+          SITE_PATH: ${{ matrix.site.path }}
+          TARGET_TYPE: ${{ matrix.site.type }}
+          TARGET_JSON: ${{ toJSON(matrix.site.target) }}
+          DEPLOY_ENV: ${{ needs.plan.outputs.environment }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: bash .github/scripts/deploy.sh

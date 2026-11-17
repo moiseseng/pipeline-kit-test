@@ -1,0 +1,11 @@
+# The only file that changes from one repository to the next.
+# Each site is a folder of this repository that gets published somewhere.
+# A repository can hold one site (one repo per app) or several (one repo per brand).
+
+sites:
+  - name: demo          # short id: lowercase letters, numbers and dashes
+    path: site          # folder to publish, relative to the repository root
+    production:         # where a merge to main publishes
+      type: simulated   # a script name from .github/scripts/targets/
+    staging:            # where a push to the staging branch publishes (optional)
+      type: simulated

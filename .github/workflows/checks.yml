@@ -1,0 +1,40 @@
+# Runs on every pull request. The rules for main require the job named "checks" to pass.
+# It uses no secrets, so it is safe to run on anyone's branch.
+name: Checks
+
+on:
+  pull_request:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pipeline config is valid
+        run: |
+          yq -o=json '.' .github/pipeline.yml > "$RUNNER_TEMP/pipeline.json"
+          python3 .github/scripts/pipeline.py validate "$RUNNER_TEMP/pipeline.json"
+
+      - name: No private keys or secrets files
+        run: bash .github/scripts/no-secrets.sh
+
+      # A repository adds its own tests by providing scripts/checks.sh.
+      - name: The repository's own checks
+        if: hashFiles('scripts/checks.sh') != ''
+        run: bash scripts/checks.sh

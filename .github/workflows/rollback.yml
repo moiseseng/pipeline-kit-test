@@ -1,0 +1,87 @@
+# Publishes an earlier version of one site to production again. Started by hand from main.
+# It only accepts a commit that is already on main, so it can't publish unreviewed code.
+# The scripts and the config always come from main; only the site's files come from the old commit.
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Site name from .github/pipeline.yml
+        required: true
+        type: string
+      commit:
+        description: Commit on main to publish again (7 to 40 characters of its SHA)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rollback:
+    name: rollback ${{ inputs.site }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production-${{ inputs.site }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find the site and the commit
+        id: find
+        env:
+          SITE: ${{ inputs.site }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          if [[ ! "$COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "'$COMMIT' is not a commit SHA." >&2
+            exit 1
+          fi
+          sha="$(git rev-parse --verify --quiet "${COMMIT}^{commit}")" || {
+            echo "Commit $COMMIT doesn't exist in this repository." >&2
+            exit 1
+          }
+          if ! git merge-base --is-ancestor "$sha" HEAD; then
+            echo "Commit $sha is not on main, so it was never approved for production." >&2
+            exit 1
+          fi
+
+          yq -o=json '.' .github/pipeline.yml > "$RUNNER_TEMP/pipeline.json"
+          site="$(python3 .github/scripts/pipeline.py plan "$RUNNER_TEMP/pipeline.json" \
+            --environment production --site "$SITE")"
+          path="$(jq -r '.[0].path' <<< "$site")"
+
+          if ! git cat-file -e "$sha:$path" 2>/dev/null; then
+            echo "The folder '$path' doesn't exist in commit $sha." >&2
+            exit 1
+          fi
+          release="$RUNNER_TEMP/release"
+          mkdir -p "$release"
+          git archive "$sha" -- "$path" | tar -x -C "$release"
+
+          {
+            echo "sha=$sha"
+            echo "path=$release/$path"
+            echo "type=$(jq -r '.[0].type' <<< "$site")"
+            echo "target=$(jq -c '.[0].target' <<< "$site")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish that version
+        env:
+          SITE_NAME: ${{ inputs.site }}
+          SITE_PATH: ${{ steps.find.outputs.path }}
+          TARGET_TYPE: ${{ steps.find.outputs.type }}
+          TARGET_JSON: ${{ steps.find.outputs.target }}
+          DEPLOY_ENV: production
+          RELEASE_SHA: ${{ steps.find.outputs.sha }}
+        run: bash .github/scripts/deploy.sh

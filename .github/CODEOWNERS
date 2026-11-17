@@ -1,0 +1,6 @@
+# Who has to approve a pull request that comes from outside the owners' group.
+# Replace the placeholder with the approving GitHub user or team, for example
+# @some-user or @some-org/owners. They need write access to this repository.
+# When several lines match a file, the last one wins.
+
+*    @moiseseng
