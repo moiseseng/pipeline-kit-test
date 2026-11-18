@@ -9,3 +9,8 @@ sites:
       type: simulated   # a script name from .github/scripts/targets/
     staging:            # where a push to the staging branch publishes (optional)
       type: simulated
+
+# Pull requests opened by these GitHub logins merge on their own once the checks pass,
+# if they asked for auto-merge. Everyone else's wait for an owner's approval.
+# An app's login is its name followed by [bot], for example: some-app[bot]
+direct_merge: []

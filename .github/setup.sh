@@ -5,13 +5,16 @@
 # Run it from a clone of the repository, signed in to the GitHub CLI (gh) as an admin:
 #   .github/setup.sh                 the repository admins skip the approval rule
 #   .github/setup.sh --team owners   organization only: that team skips it instead
+#   .github/setup.sh --app-id 12345  the auto-merge app skips it too (its numeric App ID)
 set -euo pipefail
 
 team=""
+app_id=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --team) team="${2:?--team needs a team slug}"; shift 2 ;;
-    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --app-id) app_id="${2:?--app-id needs the numeric App ID}"; shift 2 ;;
+    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -47,12 +50,19 @@ environment() {
 }
 environment production main
 environment staging staging
+# Holds the auto-merge app's key. Set MERGE_APP_CLIENT_ID (variable) and
+# MERGE_APP_PRIVATE_KEY (secret) on it; see PIPELINE.md.
+environment automerge main
 
 # Who skips the approval rule: the repository admins, or one team when --team is given.
 bypass='[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"pull_request"}]'
 if [[ -n "$team" ]]; then
   team_id="$(gh api "orgs/$owner/teams/$team" --jq .id)"
   bypass="[{\"actor_id\":$team_id,\"actor_type\":\"Team\",\"bypass_mode\":\"pull_request\"}]"
+fi
+if [[ -n "$app_id" ]]; then
+  [[ "$app_id" =~ ^[0-9]+$ ]] || { echo "--app-id must be a number." >&2; exit 2; }
+  bypass="${bypass%]},{\"actor_id\":$app_id,\"actor_type\":\"Integration\",\"bypass_mode\":\"pull_request\"}]"
 fi
 
 for file in "$here"/rulesets/*.json; do
