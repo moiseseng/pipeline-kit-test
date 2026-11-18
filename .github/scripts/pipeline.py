@@ -30,6 +30,9 @@ def problems(config, root):
         return ["The config needs a 'sites' list with at least one site."]
 
     found, seen, types = [], set(), target_types()
+    direct = config.get("direct_merge", [])
+    if not isinstance(direct, list) or any(not isinstance(login, str) or not login.strip() for login in direct):
+        found.append("'direct_merge' must be a list of GitHub logins.")
     for position, site in enumerate(config["sites"], 1):
         if not isinstance(site, dict):
             found.append(f"Site {position} must be a block with name, path and production.")

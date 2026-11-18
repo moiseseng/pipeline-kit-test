@@ -1,0 +1,130 @@
+# Merges a pull request on its own when all of this holds:
+#   - its author, whoever pushed its last commit and whoever asked for auto-merge are all
+#     listed under direct_merge in .github/pipeline.yml;
+#   - it asked for auto-merge (gh pr merge --auto);
+#   - the checks passed on its current head commit.
+# Everyone else's pull requests are left alone: they wait for an owner's approval, and then
+# GitHub's own auto-merge takes over.
+#
+# It starts when the checks finish, and also when someone asks for auto-merge after they
+# already passed. Either way GitHub runs this file from main, never from the pull request's
+# branch, so a pull request can't change the rules of its own merge. It never checks out or
+# runs pull request code. The key that lets it merge sits in the "automerge" environment,
+# which only main can use.
+name: Auto-merge
+
+on:
+  workflow_run:
+    workflows: [Checks]
+    types: [completed]
+  pull_request_target:
+    types: [auto_merge_enabled]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+defaults:
+  run:
+    shell: bash
+
+# One at a time per commit, so the two triggers can't race each other.
+concurrency:
+  group: automerge-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: decide
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    outputs:
+      merge: ${{ steps.decide.outputs.merge }}
+      number: ${{ steps.decide.outputs.number }}
+      method: ${{ steps.decide.outputs.method }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      # The config comes from main: both triggers check out the base branch by default.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide whether this pull request merges on its own
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+        run: |
+          skip() { echo "Not merging: $1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "merge=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          yq -o=json '.' .github/pipeline.yml > "$RUNNER_TEMP/pipeline.json"
+          listed() { jq -e --arg who "$1" '(.direct_merge // []) | index($who) != null' "$RUNNER_TEMP/pipeline.json" > /dev/null; }
+
+          # The open pull request into main whose head is exactly this commit.
+          number="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq "
+            [ .[] | select(.state == \"open\" and .base.ref == \"$BASE\"
+                           and .head.sha == \"$HEAD_SHA\" and .head.repo.full_name == \"$REPO\") | .number ] | first // empty")"
+          [ -n "$number" ] || skip "no open pull request into $BASE has $HEAD_SHA as its head."
+
+          pr="$(gh api "repos/$REPO/pulls/$number")"
+          author="$(jq -r '.user.login' <<< "$pr")"
+          asked_by="$(jq -r '.auto_merge.enabled_by.login // empty' <<< "$pr")"
+          method="$(jq -r '.auto_merge.merge_method // empty' <<< "$pr")"
+          [ -n "$asked_by" ] || skip "pull request #$number didn't ask for auto-merge."
+
+          # The newest checks run on this commit says whether they passed and who pushed it.
+          run="$(gh api "repos/$REPO/actions/workflows/checks.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=1" \
+            --jq '.workflow_runs | first // empty')"
+          [ -n "$run" ] || skip "the checks haven't run on $HEAD_SHA yet."
+          [ "$(jq -r '.status' <<< "$run")" = completed ] || skip "the checks on #$number are still running; this is retried when they finish."
+          [ "$(jq -r '.conclusion' <<< "$run")" = success ] || skip "the checks on #$number didn't pass."
+          pusher="$(jq -r '.actor.login' <<< "$run")"
+
+          listed "$author"   || skip "the author of #$number ($author) isn't under direct_merge, so it waits for an approval."
+          listed "$pusher"   || skip "the last commit of #$number was pushed by $pusher, who isn't under direct_merge."
+          listed "$asked_by" || skip "auto-merge on #$number was asked by $asked_by, who isn't under direct_merge."
+
+          echo "Merging #$number ($method): author $author, last push by $pusher, checks passed on $HEAD_SHA." | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "merge=true"; echo "number=$number"; echo "method=$method"; echo "sha=$HEAD_SHA"; } >> "$GITHUB_OUTPUT"
+
+  merge:
+    name: merge
+    needs: decide
+    if: needs.decide.outputs.merge == 'true'
+    runs-on: ubuntu-latest
+    environment: automerge
+    steps:
+      - name: Get a short-lived token for the merge app
+        id: app
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.MERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Merged by the app, not by the workflow's own token, so the push to main starts Deploy.
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.decide.outputs.number }}
+          METHOD: ${{ needs.decide.outputs.method }}
+          HEAD_SHA: ${{ needs.decide.outputs.sha }}
+        run: |
+          if out="$(gh api -X PUT "repos/$REPO/pulls/$NUMBER/merge" \
+                -f merge_method="$METHOD" -f sha="$HEAD_SHA" --jq '.message' 2>&1)"; then
+            echo "Merged #$NUMBER: $out" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Couldn't merge #$NUMBER: $out" | tee -a "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$NUMBER" --repo "$REPO" --body "Auto-merge didn't go through: ${out}
+
+          Bring the branch up to date with main and push again; the checks rerun and this is retried." || true
+          exit 1
